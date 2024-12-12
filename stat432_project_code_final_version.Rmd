@@ -1,0 +1,597 @@
+---
+title: "Stat 432 Project final version code"
+author: "Zirui Pang, Qiyang Wang, Wan wen"
+date: "2024-12-01"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    df_print: paged
+    toc: yes
+    toc_depth: 2
+    extra_dependencies: 
+      - fontspec
+      - xcolor
+
+---
+## Data Preprocessing
+```{r}
+library(readxl)
+crime <- read.csv('LACrime_Cleared.csv')
+LA_data <- read_excel('project432dataset.csv')
+
+# Ensure that year_month is of character type
+LA_data$year_month <- as.character(LA_data$year_month)
+
+# Parse the date using as.Date() with a custom format
+LA_data$year_month <- as.Date(paste0(LA_data$year_month, " 01"), format = "%Y %b %d")
+```
+
+---
+## EDA
+```{r}
+library(ggplot2)
+# Graph: target_crime_count overtime
+ggplot(LA_data, aes(x = year_month, y = target_crime_count)) +
+  geom_vline(xintercept = as.Date("2014-11-01"), linetype = "dashed", color = "black", size = 1) +
+  geom_line(color = "green") +
+  labs(title = "Target Crime Count Over Time",
+       x = "Time (Year-Month)", y = "Target Crime Count") +
+  theme_minimal()
+
+# Graph: target_crime_ratio & total_crime_count overtime
+ggplot() +
+  # Plot Total Crime Count on the primary Y-axis
+  geom_line(data = LA_data, aes(x = year_month, y = total_crime_count, color = "Total Crime Count"), size = 1) +
+  
+  # Plot Target Crime Ratio as a solid line
+  geom_line(data = LA_data, aes(x = year_month, y = target_crime_ratio * (21000 - 13000) / 16 + 13000, color = "Target Crime Ratio"), size = 1) +
+  
+  geom_vline(xintercept = as.Date("2014-11-01"), linetype = "dashed", color = "black", size = 1) +
+  
+  # Configure the primary Y-axis
+  scale_y_continuous(
+    name = "Total Crime Count",
+    limits = c(13000, 21000),  # Set range for Total Crime Count
+    sec.axis = sec_axis(
+      trans = ~ (. - 13000) * 16 / (21000 - 13000),  # Reverse mapping for the secondary axis
+      name = "Target Crime Ratio"
+    )
+  ) +
+  
+  # Add labels, title, and legend
+  labs(
+    title = "Crime Metrics Over Time",
+    x = "Year-Month",
+    color = "Metric"
+  ) +
+  
+  # Customize colors for the lines
+  scale_color_manual(
+    values = c("Total Crime Count" = "blue", "Target Crime Ratio" = "red"),
+    name = "Legend"
+  ) +
+  
+  # Apply minimal theme and adjust axis title colors
+  theme_minimal() +
+  theme(
+    axis.title.y = element_text(color = "blue"),
+    axis.title.y.right = element_text(color = "red")
+  )
+
+
+```
+---
+## Unsupservised Learning
+
+```{r}
+# Load necessary libraries
+library(cluster)
+library(dplyr)
+
+# Assume the data frame crime is already loaded
+# Ensure only the required variables are retained
+variables_to_keep <- c("Crm.Cd", "Vict.Age", 
+                       "Vict.Sex", "Vict.Descent", "Premis.Cd", 
+                       "Weapon.Used.Cd")
+df <- crime %>% select(all_of(variables_to_keep))
+
+# Convert non-numeric variables to factors
+df <- df %>% mutate_if(is.character, as.factor)
+
+# Clustering method: CLARA, set k = 6
+set.seed(123)  # Set random seed for reproducibility
+clara_result <- clara(df, k = 6)
+
+# Get the cluster assignments for each observation
+cluster_assignments <- clara_result$clustering
+
+# Target Crm.Cd values to analyze
+target_values <- c(442, 440, 420, 670, 654, 474, 471)
+
+# Add cluster assignments to the original data frame
+df$Cluster <- cluster_assignments
+
+# Calculate the proportion of Crm.Cd values in target_values for each cluster
+result <- df %>%
+  group_by(Cluster) %>%
+  summarise(
+    Total = n(),
+    Target_Count = sum(Crm.Cd %in% target_values, na.rm = TRUE),
+    Proportion = Target_Count / Total
+  )
+
+# View the result
+print(result)
+
+
+```
+
+```{r}
+# Assume crime is your data frame, and DATE.OCC is the date variable
+# Ensure DATE.OCC is in date-time format
+crime$DATE.OCC <- as.POSIXct(crime$DATE.OCC, format = "%Y-%m-%d %H:%M:%S")
+
+# Create an empty list to store grouped data
+crime_split <- list()
+
+# Split the data by year
+for (year in 2010:2019) {
+  # Filter data where the year equals the current year
+  crime_split[[paste0("crime", year)]] <- subset(crime, format(DATE.OCC, "%Y") == as.character(year))
+}
+
+# Assign each year's data frame as a separate variable
+list2env(crime_split, envir = .GlobalEnv)
+
+```
+```{r}
+# Add clustering results to the crime data frame
+crime$Cluster <- clara_result$clustering
+
+# Create a data frame to store yearly proportions for each cluster
+cluster_yearly <- do.call(rbind, lapply(2010:2019, function(year) {
+  # Filter data for the current year
+  year_data <- subset(crime, format(DATE.OCC, "%Y") == as.character(year))
+  
+  # Calculate the proportion of each cluster for the current year
+  cluster_proportion <- as.data.frame(table(year_data$Cluster)) %>%
+    mutate(Year = year, Proportion = Freq / sum(Freq)) %>%
+    select(Year, Cluster = Var1, Proportion)
+  
+  return(cluster_proportion)
+}))
+
+# Plot a stacked bar chart
+library(ggplot2)
+
+# Create 15 distinct colors for comparison
+cluster_colors <- c(
+  "#377eb8", "#ff7f00", "#4daf4a", "#f781bf", "#a65628", 
+  "#984ea3", "#999999", "#e41a1c", "#dede00", "#00ffff", 
+  "#006400", "#800080", "#ff6347", "#4682b4", "#ff1493"
+)
+
+# Plot stacked bar chart (without connecting lines)
+ggplot(cluster_yearly, aes(x = as.factor(Year), y = Proportion, fill = as.factor(Cluster))) +
+  geom_bar(stat = "identity", color = "black", width = 0.5) +  # Set bar width to 0.5
+  scale_fill_manual(values = cluster_colors) +  # Set custom fill colors
+  labs(title = "Cluster Proportions by Year", x = "Year", y = "Proportion", fill = "Cluster") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.major = element_line(linewidth = 0.5, linetype = "dotted", color = "gray")
+  )
+
+
+```
+```{r}
+# Example: Load and clean data
+library(dplyr)
+
+# Define the variables to retain
+variables_to_keep <- c("AREA", "Rpt.Dist.No", "Crm.Cd", "Vict.Age", 
+                       "Vict.Sex", "Vict.Descent", "Premis.Cd", 
+                       "Weapon.Used.Cd", "LOCATION", "LAT", "LON")
+
+# List of data frame names
+crime_years <- paste0("crime", 2010:2019)
+
+# Loop through each data frame
+for (year in crime_years) {
+  # Dynamically create a new data frame name
+  clean_name <- paste0(year, "_clean")
+  
+  # Use get() to retrieve the data frame, select columns, and save it as a new variable
+  assign(clean_name, get(year) %>% select(all_of(variables_to_keep)))
+}
+
+```
+
+```{r}
+# Convert character variables to factors and further encode as numeric
+# List of data frame names
+crime_clean_years <- paste0("crime", 2010:2019, "_clean")
+
+# Loop through each data frame
+for (clean_df in crime_clean_years) {
+  # Dynamically retrieve the current data frame
+  df <- get(clean_df)
+  
+  # Convert Vict.Sex, Vict.Descent, LOCATION to factors and encode as integers
+  df$Vict.Sex <- as.integer(as.factor(df$Vict.Sex))
+  df$Vict.Descent <- as.integer(as.factor(df$Vict.Descent))
+  df$LOCATION <- as.integer(as.factor(df$LOCATION))
+  
+  # Save the modified data frame back to the original variable
+  assign(clean_df, df)
+}
+```
+
+
+```{r}
+# Load necessary library
+library(cluster)
+
+# List of data frame names
+crime_clean_years <- paste0("crime", 2010:2019, "_clean")
+
+# Create an empty list to store k-medoids results
+kmedoids_results <- list()
+
+# Set random seed
+set.seed(123)
+
+# Loop through each data frame and perform CLARA clustering
+for (clean_df in crime_clean_years) {
+  # Dynamically retrieve the data frame
+  df <- get(clean_df)
+  
+  # Perform CLARA clustering (assuming 3 clusters)
+  kmedoids_results[[clean_df]] <- clara(df, k = 200)$medoids
+}
+
+``` 
+
+
+```{r}
+# Initialize a data frame to store all cluster centers
+cluster_centers <- data.frame(LAT = numeric(), LON = numeric(), Group = character())
+
+# Loop through the data for each year
+for (year in 2010:2019) {
+  clean_df <- paste0("crime", year, "_clean")
+  
+  # Retrieve the cluster medoids
+  medoids <- kmedoids_results[[clean_df]]
+  
+  # Add the cluster centers to the overall data frame
+  cluster_centers <- rbind(cluster_centers, 
+                           data.frame(
+                             LAT = medoids[, "LAT"],
+                             LON = medoids[, "LON"],
+                             Group = ifelse(year <= 2014, "2010-2014", "2015-2019")
+                           ))
+}
+```
+
+```{r}
+library(ggmap)
+
+# Register Google Maps API key
+register_google(key = "USE_YOUR_OWN_API_KEY")
+```
+
+```{r}
+# Get the map of Los Angeles
+la_map <- get_map(location = c(lon = -118.2437, lat = 34.0522), zoom = 10, maptype = "terrain")
+```
+
+```{r}
+# Plot the cluster centers on the Los Angeles map
+ggmap(la_map) +
+  geom_point(data = cluster_centers, 
+             aes(x = LON, y = LAT, color = Group), 
+             size = 0.7, alpha = 0.5) +  # Set the size and transparency of points
+  scale_color_manual(values = c("2010-2014" = "blue", "2015-2019" = "red")) +
+  labs(title = "K-Medoids Cluster Centers on Los Angeles Map",
+       x = "Longitude", y = "Latitude", color = "Year Group") +
+  theme_minimal()
+
+
+```
+---
+## Supervised Learning
+
+```{r}
+# Convert 'month' to a factor variable
+LA_data$month <- factor(LA_data$month, levels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", 
+                                                  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"))
+
+# Check the structure of the transformed data
+str(LA_data)
+
+# Load necessary library
+library(lubridate)
+
+# Split data into training and testing sets
+train_data <- LA_data[LA_data$year_month < as.Date("2014-11-01"), ]
+test_data <- LA_data[LA_data$year_month >= as.Date("2014-11-01"), ]
+
+# Ensure column names are syntactically valid
+colnames(train_data) <- make.names(colnames(train_data))
+colnames(test_data) <- make.names(colnames(test_data))
+
+```
+
+### ratio
+```{r}
+set.seed(123)
+library(randomForest)
+library(glmnet)
+
+# Convert to model matrices for regression
+x_ratio_train <- model.matrix(target_crime_ratio ~ . - year_month - target_crime_count - total_crime_count, train_data)[, -1]
+y_ratio_train <- train_data$target_crime_ratio
+
+x_ratio_test <- model.matrix(target_crime_ratio ~ . - year_month - target_crime_count - total_crime_count, test_data)[, -1]
+y_ratio_test <- test_data$target_crime_ratio
+
+# Lasso Regression
+lasso_model <- cv.glmnet(x_ratio_train, y_ratio_train, alpha = 1, nfolds = 10)  # alpha = 1 for lasso regression
+lasso_lambda <- lasso_model$lambda.min  # Optimal λ
+lasso_mse <- min(lasso_model$cvm)  # Minimum MSE from cross-validation
+
+# Elastic Net Regression
+elastic_model <- cv.glmnet(x_ratio_train, y_ratio_train, alpha = 0.5, nfolds = 10)  # alpha = 0.5 for elastic net
+elastic_lambda <- elastic_model$lambda.min  # Optimal λ
+elastic_mse <- min(elastic_model$cvm)  # Minimum MSE from cross-validation
+
+# Random Forest Regression
+rf_model <- randomForest(
+  target_crime_ratio ~ . - year_month - target_crime_count - total_crime_count,  # Exclude specified variables
+  data = train_data,
+  ntree = 50,
+  mtry = floor(sqrt(ncol(train_data) - 1)),  # Number of variables considered at each split
+  importance = TRUE
+)
+
+# Predictions and Results for Lasso Regression
+lasso_pred <- predict(lasso_model, s = lasso_lambda, newx = x_ratio_test)
+lasso_results <- data.frame(
+  year_month = test_data$year_month,  # Extract `year_month` from test data
+  prediction = lasso_pred  # Predictions from Lasso regression
+)
+colnames(lasso_results)[2] <- "prediction"  # Manually set column name
+
+# Predictions and Results for Elastic Net Regression
+elastic_pred <- predict(elastic_model, s = elastic_lambda, newx = x_ratio_test)
+elastic_results <- data.frame(
+  year_month = test_data$year_month,  # Extract `year_month` from test data
+  prediction = elastic_pred  # Predictions from Elastic Net regression
+)
+colnames(elastic_results)[2] <- "prediction"  # Manually set column name
+
+# Actual Results
+actual_results <- data.frame(
+  year_month = test_data$year_month,  # Extract `year_month` from test data
+  actual = y_ratio_test  # Corresponding actual values
+)
+
+# Predictions and Results for Random Forest Regression
+rf_predictions <- predict(rf_model, newdata = test_data)
+rf_results <- data.frame(
+  year_month = test_data$year_month,  # Extract `year_month` from test data
+  prediction = rf_predictions  # Predictions from Random Forest
+)
+
+```
+
+### predict on all data
+```{r}
+# Convert LA_data to model matrix for prediction
+x_la <- model.matrix(target_crime_ratio ~ . - year_month - target_crime_count - total_crime_count, LA_data)[, -1]
+y_la <- LA_data$target_crime_ratio
+
+# Lasso Regression Prediction
+lasso_pred <- predict(lasso_model, s = lasso_lambda, newx = x_la)
+# Create a data frame for Lasso predictions
+lasso_results_all <- data.frame(
+  year_month = LA_data$year_month,  # Extract year_month from LA_data
+  prediction = lasso_pred  # Predictions from Lasso regression
+)
+colnames(lasso_results_all)[2] <- "prediction"  # Manually set the second column name to "prediction"
+
+# Elastic Net Regression Prediction
+elastic_pred <- predict(elastic_model, s = elastic_lambda, newx = x_la)
+# Create a data frame for Elastic Net predictions
+elastic_results_all <- data.frame(
+  year_month = LA_data$year_month,  # Extract year_month from LA_data
+  prediction = elastic_pred  # Predictions from Elastic Net regression
+)
+colnames(elastic_results_all)[2] <- "prediction"  # Manually set the second column name to "prediction"
+
+# Actual Results Data Frame
+actual_results_all <- data.frame(
+  year_month = LA_data$year_month,  # Extract year_month from LA_data
+  actual = y_la  # Actual target values from LA_data
+)
+
+# Combine train and test data for Random Forest prediction
+combined_df <- rbind(train_data, test_data)
+# Random Forest Prediction on all data
+rf_all_predictions <- predict(rf_model, newdata = combined_df)
+# Create a data frame for Random Forest predictions
+rf_results_all <- data.frame(
+  year_month = LA_data$year_month,  # Extract year_month from LA_data
+  prediction = rf_all_predictions  # Predictions from Random Forest
+)
+
+```
+
+### plot
+```{r}
+# Add a column for model name to each results data frame
+lasso_results_ratio <- lasso_results_all %>% mutate(model = "Lasso")
+elastic_results_ratio <- elastic_results_all %>% mutate(model = "Elastic Net")
+actual_results_ratio <- actual_results_all %>% rename(prediction = actual) %>% mutate(model = "Actual")
+rf_results_ratio <- rf_results_all %>% mutate(model = "Random Forest")
+
+# Combine all data frames into one
+all_results_ratio <- bind_rows(lasso_results_ratio, elastic_results_ratio, actual_results_ratio, rf_results_ratio)
+
+# Ensure year_month is in date format
+all_results_ratio$year_month <- as.Date(all_results_ratio$year_month, format = "%Y-%m-%d")
+
+# Plot line chart
+ggplot(all_results_ratio, aes(x = year_month, y = prediction, color = model)) +
+  geom_line(size = 1) +  # Draw lines
+  geom_point() +         # Add points
+  geom_vline(xintercept = as.Date("2014-11-01"), linetype = "dashed", color = "black", size = 1) +  # Add vertical line
+  labs(title = "Actual vs Predicted Values",
+       x = "Year-Month",
+       y = "Values",
+       color = "Model") +
+  scale_x_date(date_breaks = "6 month", date_labels = "%Y-%m") +  # Set labels every 6 months
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Rotate x-axis labels for better readability
+
+```
+
+
+### count
+```{r}
+set.seed(123)
+library(randomForest)
+
+# Transform data
+x_count_train <- model.matrix(target_crime_count ~ . - year_month - target_crime_ratio, train_data)[, -1]
+y_count_train <- train_data$target_crime_count
+
+x_count_test <- model.matrix(target_crime_count ~ . - year_month - target_crime_ratio, test_data)[, -1]
+y_count_test <- test_data$target_crime_count
+library(glmnet)
+
+# Lasso Regression
+lasso_model_count <- cv.glmnet(x_count_train, y_count_train, alpha = 1, nfolds = 10) # alpha = 1 for lasso regression
+lasso_lambda <- lasso_model_count$lambda.min # Optimal λ
+lasso_mse <- min(lasso_model_count$cvm) # Minimum MSE from cross-validation
+
+# Elastic Net Regression
+elastic_model_count <- cv.glmnet(x_count_train, y_count_train, alpha = 0.5, nfolds = 10) # alpha = 0.5 for elastic net
+elastic_lambda <- elastic_model_count$lambda.min # Optimal λ
+elastic_mse <- min(elastic_model_count$cvm) # Minimum MSE from cross-validation
+
+# Random Forest Regression
+
+# rf_model
+rf_model_count <- randomForest(
+  target_crime_count ~ . - year_month - target_crime_count - total_crime_count,  # Specify the variables
+  data = train_data,
+  ntree = 50,
+  mtry = floor(sqrt(ncol(train_data) - 1)),
+  importance = TRUE
+)
+
+# Lasso Regression Prediction
+lasso_pred_count <- predict(lasso_model_count, s = lasso_lambda, newx = x_count_test)
+# Create Lasso prediction results dataframe
+lasso_results <- data.frame(
+  year_month = test_data$year_month,  # Extract year_month from test_data
+  prediction = lasso_pred_count  # Predicted values from Lasso regression
+)
+colnames(lasso_results)[2] <- "prediction"  # Manually set the second column as prediction
+
+# Elastic Net Regression Prediction
+elastic_pred <- predict(elastic_model_count, s = elastic_lambda, newx = x_count_test)
+# Create Elastic Net prediction results dataframe
+elastic_results <- data.frame(
+  year_month = test_data$year_month,  # Extract year_month from test_data
+  prediction = elastic_pred  # Predicted values from Elastic Net regression
+)
+colnames(elastic_results)[2] <- "prediction"  # Manually set the second column as prediction
+
+# Actual results dataframe
+actual_results <- data.frame(
+  year_month = test_data$year_month,  # Extract year_month from test_data
+  actual = y_count_test  # Corresponding actual values y_count_test
+)
+
+# Random Forest Predictions
+test_predictions <- predict(rf_model_count, newdata = test_data)
+# Create Random Forest prediction results dataframe
+rf_results <- data.frame(
+  year_month = test_data$year_month,  # Extract year_month from test_data
+  prediction = test_predictions  # Predictions from Random Forest
+)
+
+```
+
+### predict on all data
+```{r}
+x_la_count <- model.matrix(target_crime_count ~ . - year_month - target_crime_ratio, LA_data)[, -1]
+y_la_count <- LA_data$target_crime_count
+
+# Lasso Regression Prediction
+lasso_pred <- predict(lasso_model_count, s = lasso_lambda, newx = x_la_count)
+# Create Lasso prediction results dataframe
+lasso_results_all <- data.frame(
+  year_month = LA_data$year_month,  # Extract year_month from LA_data
+  prediction = lasso_pred  # Predicted values from Lasso regression
+)
+colnames(lasso_results_all)[2] <- "prediction"  # Manually set the second column as prediction
+
+# Elastic Net Regression Prediction
+elastic_pred <- predict(elastic_model_count, s = elastic_lambda, newx = x_la_count)
+# Create Elastic Net prediction results dataframe
+elastic_results_all <- data.frame(
+  year_month = LA_data$year_month,  # Extract year_month from LA_data
+  prediction = elastic_pred  # Predicted values from Elastic Net regression
+)
+colnames(elastic_results_all)[2] <- "prediction"  # Manually set the second column as prediction
+
+# Actual results dataframe
+actual_results_all <- data.frame(
+  year_month = LA_data$year_month,  # Extract year_month from LA_data
+  actual = y_la_count  # Corresponding actual values y_la_count
+)
+
+combined_df <- rbind(train_data, test_data)
+# Random Forest Predictions
+rf_all_predictions <- predict(rf_model_count, newdata = combined_df)
+# Create Random Forest prediction results dataframe
+rf_results_all <- data.frame(
+  year_month = LA_data$year_month,  # Extract year_month from LA_data
+  prediction = rf_all_predictions  # Predictions from Random Forest
+)
+```
+
+### plot
+```{r}
+# Add model name column to each results dataframe
+lasso_results_count <- lasso_results_all %>% mutate(model = "Lasso")
+elastic_results_count <- elastic_results_all %>% mutate(model = "Elastic Net")
+
+actual_results_count <- actual_results_all %>% rename(prediction = actual) %>% mutate(model = "Actual")
+rf_results_count <- rf_results_all %>% mutate(model = "Random Forest")
+
+# Combine all dataframes into one
+all_results_count <- bind_rows(lasso_results_count, elastic_results_count, actual_results_count, rf_results_count)
+
+# Ensure year_month is in date format
+all_results_count$year_month <- as.Date(all_results_count$year_month, format = "%Y-%m-%d")
+
+# Plot line chart
+ggplot(all_results_count, aes(x = year_month, y = prediction, color = model)) +
+  geom_line(size = 1) +  # Draw lines
+  geom_point() +         # Add points
+  geom_vline(xintercept = as.Date("2014-11-01"), linetype = "dashed", color = "black", size = 1) +  # Add vertical line
+  labs(title = "Actual vs Predicted Values",
+       x = "Year-Month",
+       y = "Values",
+       color = "Model") +
+  scale_x_date(date_breaks = "6 month", date_labels = "%Y-%m") +  # Set date labels every 6 months
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
